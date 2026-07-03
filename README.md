@@ -1,3 +1,7 @@
+# 高质量<付费>中转站
+
+https://sc.350303.xyz/register?aff=C8X8NEL4BXX6
+
 <h4 align="right"><strong>English</strong> | <a href="README_zh.md">简体中文</a></h4>
 <p align="center">
     <img src="https://raw.githubusercontent.com/eamonxg/assets/master/shadcn/logo/logo-lockup.png" width="360" alt="Shadcn LuCI Theme"/>
