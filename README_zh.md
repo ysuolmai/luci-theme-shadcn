@@ -2,6 +2,7 @@
 <p align="center">
     <img src="https://raw.githubusercontent.com/eamonxg/assets/master/shadcn/logo/logo-lockup.png" width="360" alt="Shadcn LuCI Theme"/>
 </p>
+<p align="center"><sub><em>Logo 其实就是 shadcn/ui 的标志，我顺手划了一道斜线，让它看起来更像 Wi-Fi 信号一点（眯起眼睛、侧着头看，大概是吧，哈哈）。</em></sub></p>
 <p align="center"><strong>一款基于 shadcn/ui 设计语言构建的现代侧边栏 OpenWrt LuCI 主题。</strong></p>
 <h4 align="center">🗂️ 侧边栏布局 | 🌗 深色/浅色模式 | 📱 移动端抽屉</h4>
 <div align="center">
@@ -31,7 +32,7 @@
 
 - **OpenWrt**：需要 OpenWrt 23.05.0 或更高版本（依赖 ucode 模板和 LuCI JavaScript APIs）。
 
-## 安装
+## 安装预编译包
 
 OpenWrt 25.12+ 及 Snapshot 版本使用 `apk`；旧版本使用 `opkg`。
 
@@ -40,14 +41,54 @@ OpenWrt 25.12+ 及 Snapshot 版本使用 `apk`；旧版本使用 `opkg`。
 - **opkg** (OpenWrt < 25.12)：
 
   ```sh
-  cd /tmp && uclient-fetch -O luci-theme-shadcn.ipk https://github.com/eamonxg/luci-theme-shadcn/releases/latest/download/luci-theme-shadcn_0.1.0-r20260520_all.ipk && opkg install luci-theme-shadcn.ipk
+  cd /tmp && uclient-fetch -O luci-theme-shadcn.ipk https://github.com/eamonxg/luci-theme-shadcn/releases/latest/download/luci-theme-shadcn_0.2.0-r20260621_all.ipk && opkg install luci-theme-shadcn.ipk
   ```
 
 - **apk** (OpenWrt 25.12+ 及 snapshots)：
 
   ```sh
-  cd /tmp && uclient-fetch -O luci-theme-shadcn.apk https://github.com/eamonxg/luci-theme-shadcn/releases/latest/download/luci-theme-shadcn-0.1.0-r20260520.apk && apk add --allow-untrusted luci-theme-shadcn.apk
+  cd /tmp && uclient-fetch -O luci-theme-shadcn.apk https://github.com/eamonxg/luci-theme-shadcn/releases/latest/download/luci-theme-shadcn-0.2.0-r20260621.apk && apk add --allow-untrusted luci-theme-shadcn.apk
   ```
+
+## 从源码构建
+
+使用 OpenWrt 构建系统自行编译。主机前置条件见 [Build system setup](https://openwrt.org/docs/guide-developer/toolchain/install-buildsystem)。产物位于 `bin/packages/<arch>/base/`（例如 `bin/packages/x86_64/base/luci-theme-shadcn_*_all.ipk`），拷贝到路由器后按上文方式安装即可。
+
+### 通过 OpenWrt buildroot
+
+```sh
+# 克隆 OpenWrt——openwrt-24.10 分支构建 .ipk，main 分支构建 .apk
+git clone https://github.com/openwrt/openwrt.git
+cd openwrt
+git checkout openwrt-24.10       # 省略则停留在 main（snapshot → .apk）
+
+# 加入本软件包并安装 feeds（提供 luci-base）
+git clone https://github.com/eamonxg/luci-theme-shadcn.git package/luci-theme-shadcn
+./scripts/feeds update -a
+./scripts/feeds install -a
+
+# 在 menuconfig 中勾选主题：LuCI → Themes → luci-theme-shadcn
+make menuconfig
+
+# 先编译主机工具与工具链，再编译本软件包
+make tools/install -j$(nproc)
+make toolchain/install -j$(nproc)
+make package/luci-theme-shadcn/compile -j$(nproc) V=s
+```
+
+### 通过预编译 SDK（更快）
+
+[OpenWrt SDK](https://openwrt.org/docs/guide-developer/toolchain/using_the_sdk) 自带预编译工具链，可省去 `tools/install` / `toolchain/install` 步骤。从 [downloads.openwrt.org](https://downloads.openwrt.org) 下载与目标匹配的 SDK（release SDK 构建 `.ipk`，snapshot SDK 构建 `.apk`）并解压，然后在 SDK 目录中执行：
+
+```sh
+git clone https://github.com/eamonxg/luci-theme-shadcn.git package/luci-theme-shadcn
+./scripts/feeds update -a
+./scripts/feeds install -a
+
+# 在 menuconfig 中勾选主题：LuCI → Themes → luci-theme-shadcn
+make menuconfig
+make package/luci-theme-shadcn/compile -j$(nproc) V=s
+```
 
 ## 许可与致谢
 
@@ -55,7 +96,7 @@ OpenWrt 25.12+ 及 Snapshot 版本使用 `apk`；旧版本使用 `opkg`。
 
 - [shadcn/ui](https://github.com/shadcn-ui/ui) — 组件美学、设计 token 与交互模式
 - [Lucide](https://github.com/lucide-icons/lucide) — 图标库
-- [Linear](https://linear.app) — 布局与排版灵感
+- [Linear](https://linear.app) — 色彩系统灵感
 - [Vite](https://vite.dev/) 和 [Tailwind CSS](https://tailwindcss.com/)
 - [luci-theme-bootstrap](https://github.com/openwrt/luci/tree/master/themes/luci-theme-bootstrap) — 模板结构与 LuCI 集成参考
 - [Claude Code](https://claude.ai/code)

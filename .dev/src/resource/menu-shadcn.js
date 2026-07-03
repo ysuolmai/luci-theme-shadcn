@@ -8,27 +8,31 @@
  * @see https://github.com/openwrt/luci/blob/master/themes/luci-theme-material/htdocs/luci-static/resources/menu-material.js
  */
 
-/** LuCI menu node `name` → icon basename under /luci-static/shadcn/icons/ */
+/** LuCI menu node `name` → icon basename under /luci-static/shadcn/icons/.
+    First-level nodes only — sub-level names such as firewall
+    (admin/network/firewall) or opkg (admin/system/opkg) never hit this map
+    and were removed as dead entries. */
 const ICON_MAP = {
   status: "activity",
-  network: "network",
   system: "settings",
+  network: "network",
   services: "layers",
-  security: "shield",
-  firewall: "shield",
   nas: "hard-drive",
-  storage: "layers",
-  qos: "activity",
-  vpn: "shield",
-  opkg: "layers",
-  statistics: "activity",
-  /** 管控 / 家长控制等非纯防火墙类入口 */
   control: "sliders-horizontal",
-  controls: "sliders-horizontal",
+  vpn: "shield",
+  docker: "container",
+  statistics: "chart-bar",
+  nlbw: "gauge",
+  /** Covers VoIP/PBX apps — no official OpenWrt package registers a
+      verified menu.d node under this name, best-effort key */
+  asterisk: "phone",
   /** luci-base `admin/logout` leaf */
   logout: "log-out",
   default: "layout-dashboard",
 };
+
+/** sessionStorage key replayed pre-paint by the inline script in header.ut */
+const CACHE_KEY = "shadcn.sidebar.cache";
 
 return baseclass.extend({
   __init__() {
@@ -36,8 +40,35 @@ return baseclass.extend({
       this.renderSidebarChrome();
       this.render(tree);
       this.initUciIndicator();
+      this.cacheSidebar();
+      window.addEventListener("pagehide", () => this.cacheSidebar());
       document.dispatchEvent(new Event("shadcn-sidebar-ready"));
     });
+  },
+
+  /**
+   * Snapshot the rendered sidebar so header.ut can replay it in the first
+   * frame of the next navigation (pagehide keeps accordion/scroll current).
+   */
+  cacheSidebar() {
+    // Set by header.ut's delegated logout-click listener.
+    if (window.shadcnSuppressSidebarCache) return;
+    const sidebar = document.getElementById("sidebar");
+    const nav = document.getElementById("sidebar-nav");
+    if (!sidebar || !nav) return;
+    try {
+      sessionStorage.setItem(
+        CACHE_KEY,
+        JSON.stringify({
+          v: 1,
+          lang: document.documentElement.lang || "",
+          html: sidebar.innerHTML,
+          scroll: nav.scrollTop || 0,
+        }),
+      );
+    } catch (e) {
+      /* storage full/disabled — next page just builds normally */
+    }
   },
 
   _mediaBase() {
@@ -56,7 +87,9 @@ return baseclass.extend({
 
   /** luci-base menu `admin/logout` — render in sidebar footer, not main nav */
   _isLogoutMenuItem(section) {
-    const n = String(section && section.name != null ? section.name : "").toLowerCase();
+    const n = String(
+      section && section.name != null ? section.name : "",
+    ).toLowerCase();
     return n === "logout" || n.endsWith("/logout");
   },
 
@@ -105,7 +138,14 @@ return baseclass.extend({
    */
   renderSidebarChrome() {
     const sidebar = document.getElementById("sidebar");
-    if (!sidebar || sidebar.getAttribute("data-shadcn-built") === "1") return;
+    if (!sidebar) return;
+    if (sidebar.getAttribute("data-shadcn-built") === "1") {
+      // Restored from cache — chrome exists; just sync a possibly stale hostname.
+      const brand = sidebar.querySelector(".sidebar-brand-text");
+      const host = sidebar.getAttribute("data-hostname");
+      if (brand && host && brand.textContent !== host) brand.textContent = host;
+      return;
+    }
     sidebar.setAttribute("data-shadcn-built", "1");
 
     const media = this._mediaBase();
@@ -134,8 +174,12 @@ return baseclass.extend({
             "aria-label": _("Toggle sidebar"),
           },
           [
-            E("span", { class: "icon-collapse" }, [this._iconFile("panel-left-close", 16)]),
-            E("span", { class: "icon-expand" }, [this._iconFile("panel-left-open", 16)]),
+            E("span", { class: "icon-collapse" }, [
+              this._iconFile("panel-left-close", 16),
+            ]),
+            E("span", { class: "icon-expand" }, [
+              this._iconFile("panel-left-open", 16),
+            ]),
           ],
         ),
       ]),
@@ -143,9 +187,9 @@ return baseclass.extend({
 
     sidebar.appendChild(E("nav", { class: "sidebar-nav", id: "sidebar-nav" }));
 
-    sidebar.appendChild(E("div", { class: "sidebar-footer", id: "sidebar-footer", hidden: "" }));
-
-    sidebar.style.removeProperty("display");
+    sidebar.appendChild(
+      E("div", { class: "sidebar-footer", id: "sidebar-footer", hidden: "" }),
+    );
   },
 
   render(tree) {
@@ -154,7 +198,6 @@ return baseclass.extend({
 
     this.renderSidebarNav(branch, branchUrl);
     this.renderBreadcrumb(branch, branchUrl);
-    this.restoreActiveAccordion(dp[1] || "");
 
     const tab = document.getElementById("tabmenu");
     if (tab) {
@@ -187,6 +230,21 @@ return baseclass.extend({
     const children = ui.menu.getChildren(branch);
     const dp = L.env.dispatchpath || [];
 
+    // If header.ut replayed the cached sidebar, this rebuild is a silent
+    // refresh — keep the user's accordion/scroll state instead of resetting
+    // to the default (active section open, scrolled to top).
+    const restored =
+      document
+        .getElementById("sidebar")
+        ?.getAttribute("data-shadcn-restored") === "1";
+    const openSections = restored
+      ? Array.from(
+          nav.querySelectorAll('.sidebar-accordion-item[data-open="true"]'),
+          (el) => el.getAttribute("data-section"),
+        )
+      : null;
+    const savedScrollTop = restored ? nav.scrollTop : 0;
+
     nav.innerHTML = "";
     if (foot) {
       foot.innerHTML = "";
@@ -198,19 +256,25 @@ return baseclass.extend({
         const isActive = dp[1] == section.name;
         const iconEl = this._sectionIcon(section.name, 18);
         foot.appendChild(
-          E("a", {
-            class: "sidebar-logout" + (isActive ? " active" : ""),
-            href: L.url(branchUrl, section.name),
-            "aria-label": _(section.title),
-            onclick: () => {
-              if (window.ShadcnSidebar && window.ShadcnSidebar.closeDrawer) {
-                window.ShadcnSidebar.closeDrawer();
-              }
+          E(
+            "a",
+            {
+              class: "sidebar-logout" + (isActive ? " active" : ""),
+              href: L.url(branchUrl, section.name),
+              "aria-label": _(section.title),
+              onclick: () => {
+                if (window.ShadcnSidebar && window.ShadcnSidebar.closeDrawer) {
+                  window.ShadcnSidebar.closeDrawer();
+                }
+              },
             },
-          }, [
-            E("span", { class: "sidebar-icon", "aria-hidden": "true" }, [iconEl]),
-            E("span", { class: "sidebar-label" }, [_(section.title)]),
-          ]),
+            [
+              E("span", { class: "sidebar-icon", "aria-hidden": "true" }, [
+                iconEl,
+              ]),
+              E("span", { class: "sidebar-label" }, [_(section.title)]),
+            ],
+          ),
         );
         foot.hidden = false;
         return;
@@ -222,24 +286,33 @@ return baseclass.extend({
 
       if (subs.length === 0) {
         nav.appendChild(
-          E("div", { class: "sidebar-nav-item" + (isActive ? " active" : "") }, [
-            E(
-              "a",
-              {
-                class: "sidebar-nav-parent no-sub",
-                href: L.url(branchUrl, section.name),
-                onclick: () => {
-                  if (window.ShadcnSidebar && window.ShadcnSidebar.closeDrawer) {
-                    window.ShadcnSidebar.closeDrawer();
-                  }
+          E(
+            "div",
+            { class: "sidebar-nav-item" + (isActive ? " active" : "") },
+            [
+              E(
+                "a",
+                {
+                  class: "sidebar-nav-parent no-sub",
+                  href: L.url(branchUrl, section.name),
+                  onclick: () => {
+                    if (
+                      window.ShadcnSidebar &&
+                      window.ShadcnSidebar.closeDrawer
+                    ) {
+                      window.ShadcnSidebar.closeDrawer();
+                    }
+                  },
                 },
-              },
-              [
-                E("span", { class: "sidebar-icon", "aria-hidden": "true" }, [iconEl]),
-                E("span", { class: "sidebar-label" }, [_(section.title)]),
-              ],
-            ),
-          ]),
+                [
+                  E("span", { class: "sidebar-icon", "aria-hidden": "true" }, [
+                    iconEl,
+                  ]),
+                  E("span", { class: "sidebar-label" }, [_(section.title)]),
+                ],
+              ),
+            ],
+          ),
         );
         return;
       }
@@ -248,38 +321,49 @@ return baseclass.extend({
         "div",
         {
           class: "sidebar-accordion-item" + (isActive ? " active" : ""),
-          "data-open": "false",
+          "data-open": isActive ? "true" : "false",
           "data-section": section.name,
         },
         [
           E("button", { class: "sidebar-nav-parent", type: "button" }, [
-            E("span", { class: "sidebar-icon", "aria-hidden": "true" }, [iconEl]),
+            E("span", { class: "sidebar-icon", "aria-hidden": "true" }, [
+              iconEl,
+            ]),
             E("span", { class: "sidebar-label" }, [_(section.title)]),
             E("span", { class: "sidebar-chevron", "aria-hidden": "true" }, [
               this._iconFile("chevron-down", 18),
             ]),
           ]),
-          E("div", { class: "sidebar-accordion-sub", style: "max-height:0;" }, [
+          E("div", { class: "sidebar-accordion-sub" }, [
             E(
               "ul",
               { class: "sidebar-sub-list" },
               subs.map((page) => {
                 const isPageActive = isActive && dp[2] == page.name;
-                return E("li", { class: "sidebar-sub-item" + (isPageActive ? " active" : "") }, [
-                  E(
-                    "a",
-                    {
-                      class: "sidebar-sub-link",
-                      href: L.url(branchUrl, section.name, page.name),
-                      onclick: () => {
-                        if (window.ShadcnSidebar && window.ShadcnSidebar.closeDrawer) {
-                          window.ShadcnSidebar.closeDrawer();
-                        }
+                return E(
+                  "li",
+                  {
+                    class: "sidebar-sub-item" + (isPageActive ? " active" : ""),
+                  },
+                  [
+                    E(
+                      "a",
+                      {
+                        class: "sidebar-sub-link",
+                        href: L.url(branchUrl, section.name, page.name),
+                        onclick: () => {
+                          if (
+                            window.ShadcnSidebar &&
+                            window.ShadcnSidebar.closeDrawer
+                          ) {
+                            window.ShadcnSidebar.closeDrawer();
+                          }
+                        },
                       },
-                    },
-                    [_(page.title)],
-                  ),
-                ]);
+                      [_(page.title)],
+                    ),
+                  ],
+                );
               }),
             ),
           ]),
@@ -288,6 +372,18 @@ return baseclass.extend({
 
       nav.appendChild(item);
     });
+
+    if (restored) {
+      nav.querySelectorAll(".sidebar-accordion-item").forEach((item) => {
+        item.setAttribute(
+          "data-open",
+          openSections.includes(item.getAttribute("data-section"))
+            ? "true"
+            : "false",
+        );
+      });
+      nav.scrollTop = savedScrollTop;
+    }
   },
 
   renderBreadcrumb(branch, branchUrl) {
@@ -303,16 +399,24 @@ return baseclass.extend({
     const ch = branch.children || {};
     const sectionNode = ch[activeSection];
     const pageNode =
-      sectionNode && sectionNode.children ? sectionNode.children[activePage] : null;
+      sectionNode && sectionNode.children
+        ? sectionNode.children[activePage]
+        : null;
 
     if (sectionNode) {
-      crumb.appendChild(E("span", { class: "breadcrumb-item" }, [_(sectionNode.title)]));
+      crumb.appendChild(
+        E("span", { class: "breadcrumb-item" }, [_(sectionNode.title)]),
+      );
     }
     if (pageNode) {
       crumb.appendChild(
-        E("span", { class: "breadcrumb-sep" }, [this._iconFile("chevron-right", 14)]),
+        E("span", { class: "breadcrumb-sep" }, [
+          this._iconFile("chevron-right", 14),
+        ]),
       );
-      crumb.appendChild(E("span", { class: "breadcrumb-item active" }, [_(pageNode.title)]));
+      crumb.appendChild(
+        E("span", { class: "breadcrumb-item active" }, [_(pageNode.title)]),
+      );
     }
   },
 
@@ -351,20 +455,6 @@ return baseclass.extend({
       this.renderTabMenu(activeNode, url + "/" + activeNode.name, l);
 
     return ul;
-  },
-
-  restoreActiveAccordion(activeSection) {
-    if (!activeSection) return;
-    const item = document.querySelector(
-      '.sidebar-accordion-item[data-section="' +
-        String(activeSection).replace(/\\/g, "\\\\").replace(/"/g, '\\"') +
-        '"]',
-    );
-    if (!item) return;
-    const sub = item.querySelector(".sidebar-accordion-sub");
-    if (!sub) return;
-    item.setAttribute("data-open", "true");
-    sub.style.maxHeight = sub.scrollHeight + "px";
   },
 
   initUciIndicator() {

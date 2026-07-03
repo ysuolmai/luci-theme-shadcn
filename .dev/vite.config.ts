@@ -5,7 +5,7 @@
 
 import tailwindcss from "@tailwindcss/vite";
 import { exec } from "child_process";
-import { watch as fsWatch } from "fs";
+import { watch as fsWatch, readdirSync } from "fs";
 import { mkdir, readdir, readFile, writeFile } from "fs/promises";
 import { dirname, join, relative, resolve } from "path";
 import { minify as terserMinify } from "terser";
@@ -18,7 +18,10 @@ const CURRENT_DIR = process.cwd();
 const PROJECT_ROOT = resolve(CURRENT_DIR, "..");
 const BUILD_OUTPUT = resolve(PROJECT_ROOT, "htdocs/luci-static");
 
-async function scanFiles(dir: string, extensions: string[] = []): Promise<string[]> {
+async function scanFiles(
+  dir: string,
+  extensions: string[] = [],
+): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries) {
@@ -42,7 +45,9 @@ function createLuciJsCompressPlugin(): Plugin {
   return {
     name: "luci-js-compress",
     apply: "build",
-    configResolved(config: ResolvedConfig) { outDir = config.build.outDir; },
+    configResolved(config: ResolvedConfig) {
+      outDir = config.build.outDir;
+    },
     async buildStart() {
       const srcDir = resolve(CURRENT_DIR, "src/resource");
       jsFiles = await scanFiles(srcDir, [".js"]);
@@ -57,7 +62,10 @@ function createLuciJsCompressPlugin(): Plugin {
             mangle: false,
             format: { comments: false, beautify: false },
           });
-          const relativePath = relative(resolve(CURRENT_DIR, "src/resource"), filePath).replace(/\\/g, "/");
+          const relativePath = relative(
+            resolve(CURRENT_DIR, "src/resource"),
+            filePath,
+          ).replace(/\\/g, "/");
           const outputPath = join(outDir, "resources", relativePath);
           await mkdir(dirname(outputPath), { recursive: true });
           await writeFile(outputPath, compressed.code || sourceCode, "utf-8");
@@ -69,13 +77,31 @@ function createLuciJsCompressPlugin(): Plugin {
   };
 }
 
+// On-demand third-party patches: serve each src/media/patches/<page>.css at
+// /luci-static/shadcn/patches/<page>.css in dev. Without this, header.ut's patch
+// <link> falls through to the OpenWrt proxy (404 / stale router asset) and patch
+// edits don't trigger HMR. Mirrors the build entries derived from the same dir.
+function patchCssRoutes(): Record<string, string> {
+  const dir = resolve(CURRENT_DIR, "src/media/patches");
+  return Object.fromEntries(
+    readdirSync(dir)
+      .filter((f) => f.endsWith(".css"))
+      .map((f) => [
+        `/luci-static/shadcn/patches/${f}`,
+        `/src/media/patches/${f}`,
+      ]),
+  );
+}
+
 function createLocalServePlugin(): Plugin {
   const cssRoutes: Record<string, string> = {
     "/luci-static/shadcn/main.css": "/src/media/main.css",
     "/luci-static/shadcn/login.css": "/src/media/login.css",
+    ...patchCssRoutes(),
   };
   const jsRoutes: Record<string, string> = {
-    "/luci-static/resources/sidebar-shadcn.js": "src/resource/sidebar-shadcn.js",
+    "/luci-static/resources/sidebar-shadcn.js":
+      "src/resource/sidebar-shadcn.js",
     "/luci-static/resources/menu-shadcn.js": "src/resource/menu-shadcn.js",
   };
 
@@ -102,7 +128,10 @@ function createLocalServePlugin(): Plugin {
         if (!req.url) return next();
         const [pathname, search] = req.url.split("?");
         const cssTarget = cssRoutes[pathname];
-        if (cssTarget) { req.url = cssTarget + (search ? `?${search}` : ""); return next(); }
+        if (cssTarget) {
+          req.url = cssTarget + (search ? `?${search}` : "");
+          return next();
+        }
         const jsPath = jsRoutes[pathname];
         if (jsPath) {
           try {
@@ -134,16 +163,28 @@ function createLocalServePlugin(): Plugin {
 const UT_TEMPLATE_DIR = resolve(PROJECT_ROOT, "ucode/template/themes/shadcn");
 const UT_REMOTE_DIR = "/usr/share/ucode/luci/template/themes/shadcn";
 
-interface ScpConfig { host: string; key?: string; }
+interface ScpConfig {
+  host: string;
+  key?: string;
+}
 
 function buildSshArgs(cfg: ScpConfig): string {
-  const args = ["-o StrictHostKeyChecking=no", "-o UserKnownHostsFile=/dev/null"];
+  const args = [
+    "-o StrictHostKeyChecking=no",
+    "-o UserKnownHostsFile=/dev/null",
+  ];
   if (cfg.key) args.push(`-i "${cfg.key}"`);
   return args.join(" ");
 }
 
-function buildScpCommand(localPath: string, remotePath: string, cfg: ScpConfig): string {
-  return `scp ${buildSshArgs(cfg)} "${localPath}" "${cfg.host}:${remotePath}"`;
+// Stream the file over ssh stdin instead of scp: OpenSSH 9+ scp defaults to
+// the SFTP protocol, which Dropbear on OpenWrt does not ship a server for.
+function buildScpCommand(
+  localPath: string,
+  remotePath: string,
+  cfg: ScpConfig,
+): string {
+  return `ssh ${buildSshArgs(cfg)} "${cfg.host}" "cat > '${remotePath}'" < "${localPath}"`;
 }
 
 function parseHost(sshHost: string): string {
@@ -155,27 +196,39 @@ async function checkSshConnection(cfg: ScpConfig): Promise<boolean> {
   const host = parseHost(cfg.host);
 
   try {
-    await execAsync(`ssh ${buildSshArgs(cfg)} -o ConnectTimeout=5 "${cfg.host}" echo ok`);
+    await execAsync(
+      `ssh ${buildSshArgs(cfg)} -o ConnectTimeout=5 "${cfg.host}" echo ok`,
+    );
     console.log(`[UT Sync] SSH connection verified.`);
     return true;
   } catch (err: any) {
     const stderr = err?.stderr || err?.message || "";
 
-    if (stderr.includes("Host key verification failed") || stderr.includes("REMOTE HOST IDENTIFICATION HAS CHANGED")) {
+    if (
+      stderr.includes("Host key verification failed") ||
+      stderr.includes("REMOTE HOST IDENTIFICATION HAS CHANGED")
+    ) {
       console.error(`\n[UT Sync] SSH host key mismatch for ${host}.`);
       console.error(`[UT Sync] The device may have been reflashed. Run:\n`);
       console.error(`  ssh-keygen -R ${host}\n`);
       console.error(`[UT Sync] Then restart the dev server.\n`);
-    } else if (stderr.includes("Permission denied") || stderr.includes("Authentication failed")) {
+    } else if (
+      stderr.includes("Permission denied") ||
+      stderr.includes("Authentication failed")
+    ) {
       console.error(`\n[UT Sync] SSH authentication failed for ${cfg.host}.`);
       console.error(`[UT Sync] Copy your public key to the device, e.g.:\n`);
-      console.error(`  cat ~/.ssh/id_ed25519.pub | ssh ${cfg.host} "cat >> /etc/dropbear/authorized_keys"\n`);
+      console.error(
+        `  cat ~/.ssh/id_ed25519.pub | ssh ${cfg.host} "cat >> /etc/dropbear/authorized_keys"\n`,
+      );
     } else if (
       stderr.includes("Connection refused") ||
       stderr.includes("Connection timed out") ||
       stderr.includes("No route to host")
     ) {
-      console.error(`\n[UT Sync] Cannot reach ${host}. Check that the device is online and SSH is enabled.\n`);
+      console.error(
+        `\n[UT Sync] Cannot reach ${host}. Check that the device is online and SSH is enabled.\n`,
+      );
     } else {
       console.error(`\n[UT Sync] SSH connection failed: ${stderr}\n`);
     }
@@ -192,13 +245,17 @@ function createUtSyncPlugin(cfg: ScpConfig): Plugin {
     apply: "serve",
     configureServer(server) {
       if (!cfg.host) {
-        console.log("[UT Sync] Disabled: VITE_OPENWRT_SSH_HOST not set in .env (see .env.example)");
+        console.log(
+          "[UT Sync] Disabled: VITE_OPENWRT_SSH_HOST not set in .env (see .env.example)",
+        );
         return;
       }
 
       const authInfo = cfg.key ? `key (${cfg.key})` : "ssh-agent/config";
       console.log(`[UT Sync] Watching ${UT_TEMPLATE_DIR}`);
-      console.log(`[UT Sync] Target: ${cfg.host}:${UT_REMOTE_DIR} (auth: ${authInfo})`);
+      console.log(
+        `[UT Sync] Target: ${cfg.host}:${UT_REMOTE_DIR} (auth: ${authInfo})`,
+      );
 
       checkSshConnection(cfg).then((ok) => {
         if (!ok) return;
@@ -212,14 +269,19 @@ function createUtSyncPlugin(cfg: ScpConfig): Plugin {
           const remotePath = `${UT_REMOTE_DIR}/${filename}`;
           const cmd = buildScpCommand(filePath, remotePath, cfg);
 
-          console.log(`[UT Sync] Syncing ${filename} → ${cfg.host}:${remotePath}`);
+          console.log(
+            `[UT Sync] Syncing ${filename} → ${cfg.host}:${remotePath}`,
+          );
           execAsync(cmd)
             .then(() => {
               console.log(`[UT Sync] Done. Reloading browser.`);
               server.ws.send({ type: "full-reload", path: "*" });
             })
             .catch((err: any) => {
-              console.error(`[UT Sync] Failed to sync ${filename}:`, err?.message);
+              console.error(
+                `[UT Sync] Failed to sync ${filename}:`,
+                err?.message,
+              );
             })
             .finally(() => {
               syncing = false;
@@ -267,15 +329,20 @@ export default defineConfig(({ mode }) => {
     ],
     css: {
       postcss: {
-        plugins: [{
-          postcssPlugin: "remove-layers",
-          Once(root: any) {
-            function removeLayers(node: any) {
-              node.walkAtRules("layer", (rule: any) => { removeLayers(rule); rule.replaceWith(rule.nodes); });
-            }
-            removeLayers(root);
+        plugins: [
+          {
+            postcssPlugin: "remove-layers",
+            Once(root: any) {
+              function removeLayers(node: any) {
+                node.walkAtRules("layer", (rule: any) => {
+                  removeLayers(rule);
+                  rule.replaceWith(rule.nodes);
+                });
+              }
+              removeLayers(root);
+            },
           },
-        }],
+        ],
       },
     },
     build: {
@@ -286,6 +353,17 @@ export default defineConfig(({ mode }) => {
         input: {
           main: resolve(CURRENT_DIR, "src/media/main.css"),
           login: resolve(CURRENT_DIR, "src/media/login.css"),
+          // On-demand third-party patches: one entry per page, output to
+          // shadcn/patches/<page>.css (the `patches/` key prefix lands them there
+          // via assetFileNames below). header.ut links the matching one per page.
+          ...Object.fromEntries(
+            readdirSync(resolve(CURRENT_DIR, "src/media/patches"))
+              .filter((f) => f.endsWith(".css"))
+              .map((f) => [
+                `patches/${f.slice(0, -4)}`,
+                resolve(CURRENT_DIR, "src/media/patches", f),
+              ]),
+          ),
         },
         output: { assetFileNames: "shadcn/[name].[ext]" },
       },
@@ -294,8 +372,15 @@ export default defineConfig(({ mode }) => {
       host: DEV_HOST,
       port: DEV_PORT,
       proxy: {
-        "/luci-static": { target: OPENWRT_HOST, changeOrigin: true, secure: false },
-        "/cgi-bin": { target: OPENWRT_HOST, changeOrigin: true, secure: false,
+        "/luci-static": {
+          target: OPENWRT_HOST,
+          changeOrigin: true,
+          secure: false,
+        },
+        "/cgi-bin": {
+          target: OPENWRT_HOST,
+          changeOrigin: true,
+          secure: false,
           configure: (proxy: any) => {
             proxy.on("proxyRes", (proxyRes: any, req: any, res: any) => {
               const ct = proxyRes.headers["content-type"] || "";
@@ -305,7 +390,10 @@ export default defineConfig(({ mode }) => {
               proxyRes.on("end", () => {
                 let html = Buffer.concat(chunks).toString("utf-8");
                 const client = `<script type="module" src="/@vite/client"></script>`;
-                if (html.includes("</head>") && !html.includes("/@vite/client")) {
+                if (
+                  html.includes("</head>") &&
+                  !html.includes("/@vite/client")
+                ) {
                   html = html.replace("</head>", `${client}\n\t</head>`);
                 }
                 res.removeAllListeners("end");
